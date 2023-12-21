@@ -1,0 +1,55 @@
+# Pipeline to test Python application using Windows self-hosted agent
+# Pipeline triggers when a change is pushed to main or develop branches
+# Publishes pytest test reports and code coverage (pip install coverage) reports
+# configure self-hosted agent: https://learn.microsoft.com/en-us/azure/devops/pipelines/agents/windows-agent?view=azure-devops#download-and-configure-the-agent
+# Install Python in self-hosted agent: https://learn.microsoft.com/en-gb/azure/devops/pipelines/tasks/reference/use-python-version-v0?view=azure-pipelines&viewFallbackFrom=azure-devops#how-can-i-configure-a-self-hosted-agent-to-use-this-task
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+
+pool:
+  name: self_hosted_agent
+
+variables:
+- group: MY_VARIABLE_GROUP
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.9'
+  displayName: 'Use Python 3.9'
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+  displayName: 'Install dependencies'
+
+- script: |
+    pip install flake8
+    flake8
+  displayName: Flake8
+  enabled: true
+  continueOnError: true
+
+- script: |
+    pip install pytest coverage
+    coverage run -m pytest --junitxml=test-unit.xml
+    coverage xml
+  displayName: 'pytest and code coverage'
+
+- task: PublishCodeCoverageResults@1
+  inputs:
+    codeCoverageTool: 'cobertura'
+    summaryFileLocation: '$(Build.SourcesDirectory)/coverage.xml'
+    failIfCoverageEmpty: true
+  displayName: 'Publish code coverage results'
+
+- task: PublishTestResults@2
+  displayName: 'Publish Test Results'
+  inputs:
+    testResultsFormat: 'JUnit'
+    testResultsFiles: 'test-unit.xml'
+    testRunTitle: 'Python 3.9'
