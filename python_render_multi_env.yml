@@ -1,0 +1,101 @@
+# Pipeline to deploy Python application using Windows self-hosted agent
+# Pipeline triggers when a change is pushed to main or develop branches
+# Application will be deployed to test env when a change is pushed to develop branch
+# Application will be deployed to production env when a change is pushed to main branch
+# Step 1 - flake8 linting and testing with pytest
+# Step 2 - Build Docker image
+# Step 3 - Push docker image to DockerHub test repo when change is pushed to develop branch
+# Step 4 - Deploy docker image from DockerHub test repo to render.com test env using webhook
+# Step 5 - Push docker image to DockerHub prod repo when change is pushed to main branch
+# Step 6 - Deploy docker image from DockerHub prod repo to render.com prod env using webhook
+# configure self-hosted agent: https://learn.microsoft.com/en-us/azure/devops/pipelines/agents/windows-agent?view=azure-devops#download-and-configure-the-agent
+# Install Python in self-hosted agent: https://learn.microsoft.com/en-gb/azure/devops/pipelines/tasks/reference/use-python-version-v0?view=azure-pipelines&viewFallbackFrom=azure-devops#how-can-i-configure-a-self-hosted-agent-to-use-this-task
+
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+
+pool:
+  name: self_hosted_agent
+
+variables:
+- group: ML_VARIABLE_GROUP
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.9'
+  displayName: 'Use Python 3.9'
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install -r requirements.txt
+  displayName: 'Install dependencies'
+
+- script: |
+    pip install flake8
+    flake8
+  displayName: Flake8
+  enabled: true
+  continueOnError: true
+
+- script: |
+    pip install pytest
+    python -m pytest
+  displayName: 'pytest'
+
+- task: PublishTestResults@2
+  displayName: 'Publish Test Results **/test-results.xml'
+  inputs:
+    testResultsFiles: '**/test-results.xml'
+    testRunTitle: 'Python 3.9'
+
+- task: Docker@0
+  displayName: 'Build Test image'
+  inputs:
+    containerregistrytype: 'Container Registry'
+    dockerRegistryConnection: 'docker_hub_service_connection'
+    imageName: '$(DOCKERHUB_REPO_TEST):$(Build.BuildId)'
+    includeLatestTag: true
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+
+- task: Docker@0
+  displayName: 'Push Test image'
+  inputs:
+    containerregistrytype: 'Container Registry'
+    dockerRegistryConnection: 'docker_hub_service_connection'
+    action: 'Push an image'
+    imageName: '$(DOCKERHUB_REPO_TEST):$(Build.BuildId)'
+    includeLatestTag: true
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+
+- script: curl.exe $(RENDER_WEBHOOK_TEST)
+  displayName: 'Deploy To render.com (Test Env)'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+
+- task: Docker@0
+  displayName: 'Build Prod image'
+  inputs:
+    containerregistrytype: 'Container Registry'
+    dockerRegistryConnection: 'docker_hub_service_connection'
+    imageName: '$(DOCKERHUB_REPO_PROD):$(Build.BuildId)'
+    includeLatestTag: true
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+- task: Docker@0
+  displayName: 'Push Prod image'
+  inputs:
+    containerregistrytype: 'Container Registry'
+    dockerRegistryConnection: 'docker_hub_service_connection'
+    action: 'Push an image'
+    imageName: '$(DOCKERHUB_REPO_PROD):$(Build.BuildId)'
+    includeLatestTag: true
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+- script: |
+    curl.exe $(RENDER_WEBHOOK_PROD)
+  displayName: 'Deploy To render.com (Prod Env)'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
