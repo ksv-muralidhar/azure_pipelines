@@ -1,0 +1,186 @@
+# Pipeline to deploy Python application using Windows self-hosted agent
+# CI stage triggers when a change is pushed to develop/main branch
+# CD stages (Staging & Production) are triggered when a change is pushed to main branch
+
+# Step 1 - flake8 linting, coverage and testing with pytest
+# Step 2 - Build staging Docker image
+# Step 3 - Push staging docker image to staging DockerHub repo
+# Step 4 - Deploy staging docker image from staging DockerHub repo to render.com (staging service) using webhook.
+# Step 5 - Delay the pipeline execution for 1 minute so that the deployment completes. Then test the staging API endpoint
+## Deployment to production environment happens after approval by the specified approvers
+# Step 6 - Build production Docker image
+# Step 7 - Push production docker image to production DockerHub repo
+# Step 8 - Deploy production docker image from production DockerHub repo to render.com (production service) using webhook
+# Step 9 - Delay the pipeline execution for 1 minute so that the deployment completes. Then test the production API endpoint
+
+# configure self-hosted agent: https://learn.microsoft.com/en-us/azure/devops/pipelines/agents/windows-agent?view=azure-devops#download-and-configure-the-agent
+# Install Python in self-hosted agent: https://learn.microsoft.com/en-gb/azure/devops/pipelines/tasks/reference/use-python-version-v0?view=azure-pipelines&viewFallbackFrom=azure-devops#how-can-i-configure-a-self-hosted-agent-to-use-this-task
+
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+
+pool:
+  name: self_hosted_agent
+
+variables:
+- group: ML_VARIABLE_GROUP
+
+stages:
+- stage: CI
+  displayName: 'CI stage'
+  # condition is not required. However, mentioning it to notify that CI stage should run when triggered by main and develop only.
+  condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['Build.SourceBranch'], 'refs/heads/develop')))
+  jobs:
+  - job: build
+    displayName: Build
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.9'
+      displayName: 'Use Python 3.9'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+
+    - script: |
+        pip install flake8
+        flake8
+      displayName: Flake8
+      enabled: true
+      continueOnError: true
+
+    - script: |
+        pip install pytest coverage
+        coverage run -m pytest --junitxml=test-unit.xml
+        coverage xml
+      displayName: 'pytest and code coverage'
+
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'cobertura'
+        summaryFileLocation: '$(Build.SourcesDirectory)/coverage.xml'
+        failIfCoverageEmpty: true
+      displayName: 'Publish code coverage results'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'test-unit.xml'
+        testRunTitle: 'Python 3.9'
+
+- stage: CD_staging
+  displayName: 'CD stage (Staging Environment)'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: deploy
+    displayName: 'Deploy to Staging Environment'
+    environment: Staging
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: Docker@0
+            displayName: 'Build staging docker image'
+            inputs:
+              containerregistrytype: 'Container Registry'
+              dockerRegistryConnection: 'docker_hub_service_connection'
+              imageName: '$(STAGING_DOCKERHUB_REPO):$(Build.BuildId)'
+              includeLatestTag: true
+
+          - task: Docker@0
+            displayName: 'Push image to staging dockerhub repo'
+            inputs:
+              containerregistrytype: 'Container Registry'
+              dockerRegistryConnection: 'docker_hub_service_connection'
+              action: 'Push an image'
+              imageName: '$(STAGING_DOCKERHUB_REPO):$(Build.BuildId)'
+              includeLatestTag: true
+
+          - script: |
+              curl.exe $(STAGING_RENDER_WEBHOOK)
+            displayName: 'Deploy To Staging service (render.com)'
+            
+
+- stage: test_staging_api
+  displayName: 'Test Staging API'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main')) 
+  jobs:
+  - job: test_api
+    displayName: 'Test API Endpoint'
+    pool: server     
+    steps:
+    # Delay pipeline execution for render.com deployment to be completed
+    - task: Delay@1
+      displayName: 'Delaying execution for 1 minute'
+      inputs:
+        delayForMinutes: '1'
+    - task: InvokeRESTAPI@1
+      inputs:
+        connectionType: 'connectedServiceName'
+        serviceConnection: 'staging_api_endpoint'
+        method: 'GET'
+        urlSuffix: $(URL_SUFFIX)
+        waitForCompletion: 'false'
+        successCriteria: 'ne(root[''confidence''], ''-1'')'
+            
+
+- stage: CD_production
+  displayName: 'CD stage (Production Environment)'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: deploy
+    displayName: 'Deploy to Production Environment'
+    environment: Production
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: Docker@0
+            displayName: 'Build production docker image'
+            inputs:
+              containerregistrytype: 'Container Registry'
+              dockerRegistryConnection: 'docker_hub_service_connection'
+              imageName: '$(PRODUCTION_DOCKERHUB_REPO):$(Build.BuildId)'
+              includeLatestTag: true
+
+          - task: Docker@0
+            displayName: 'Push image to production dockerhub repo'
+            inputs:
+              containerregistrytype: 'Container Registry'
+              dockerRegistryConnection: 'docker_hub_service_connection'
+              action: 'Push an image'
+              imageName: '$(PRODUCTION_DOCKERHUB_REPO):$(Build.BuildId)'
+              includeLatestTag: true
+
+          - script: |
+              curl.exe $(PRODUCTION_RENDER_WEBHOOK)
+            displayName: 'Deploy To Production service (render.com)'
+            
+- stage: test_production_api
+  displayName: 'Test Production API'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main')) 
+  jobs:
+  - job: test_api
+    displayName: 'Test API Endpoint'
+    pool: server     
+    steps:
+    # Delay pipeline execution for render.com deployment to be completed
+    - task: Delay@1
+      displayName: 'Delaying execution for 1 minute'
+      inputs:
+        delayForMinutes: '1'
+    - task: InvokeRESTAPI@1
+      inputs:
+        connectionType: 'connectedServiceName'
+        serviceConnection: 'production_api_endpoint'
+        method: 'GET'
+        urlSuffix: $(URL_SUFFIX)
+        waitForCompletion: 'false'
+        successCriteria: 'ne(root[''confidence''], ''-1'')'
